@@ -33,13 +33,16 @@ class OpenSSL::Digest::MD5
 
 # => http://tools.ietf.org/html/rfc3414#section-6.3.1
 	def usmHMACMD5AuthProtocol(authKey, wholeMsg)
-		@extendedAuthKey = (authKey.unpack('H*') + ["\x00" * 48].join.unpack('H*')).pack('H*')
+		@extendedAuthKey = (authKey.unpack('C*') + ["\x00" * 48].join.unpack('C*')).pack('C*')
 		@IPAD = ["\x36" * 64].join
 		@K1 = @extendedAuthKey ^ @IPAD
 		@OPAD = ["\x5C" * 64].join
 		@K2 = @extendedAuthKey ^ @OPAD
-		@MAC = self.digest(@K1 + wholeMsg)
-		self.digest(@K2 + @MAC)[0, 12]
+		@MACmd5 = OpenSSL::Digest::MD5.new
+		@MACmd5 << (@K1.unpack('C*') + wholeMsg.unpack('C*')).pack('C*')
+		@MAC = @MACmd5.digest
+		self << (@K2.unpack('C*') + @MAC.unpack('C*')).pack('C*')
+		self.digest[0, 12]
 	end
 end
 
@@ -63,9 +66,7 @@ MSG_ID                  = "\x01"
 MSG_MAX_SIZE            = "\x20\x00"    # 8192
 MSG_SECURITY_MODEL      = "\x03"        # usmSecurityModel
 
-def create_probe_snmp3(msgFlags, userName, authPass, privPass, msgAuthEngineID)
-		msgAuthEngineBoots = "0"
-		msgAuthEngineTime = "0"
+def create_probe_snmp3(msgFlags, userName, authPass, privPass, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime)
 		msgPrivParam = ""
 		msgAuthParam = ["\x00" * 12].join
 
@@ -74,14 +75,6 @@ def create_probe_snmp3(msgFlags, userName, authPass, privPass, msgAuthEngineID)
 			"\x04\x00\xa0\x0e\x02\x04\x0e\xf0" + "\xee\x8f\x02\x01\x00\x02\x01\x00" +
 			"\x30\x00"
 		pduHead = SEQUENCE + [pdu.length].pack('C')
-
-		if authPass.length > 0
-			msgDigest = OpenSSL::Digest::MD5.new
-			authKey = msgDigest.usmHMACMD5AuthKey(authPass, msgAuthEngineID)
-			msgDigest = OpenSSL::Digest::MD5.new
-			puts authKey.unpack('H*')
-			msgAuthParam = msgDigest.usmHMACMD5AuthProtocol(authKey, (pdu + pduHead))
-		end
 
 		msgGlobalData =
 				INTEGER + [MSG_ID.length].pack('C') + MSG_ID +
@@ -92,8 +85,8 @@ def create_probe_snmp3(msgFlags, userName, authPass, privPass, msgAuthEngineID)
 
 		msgSecurityParameters   =
 				OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
-				INTEGER + [msgAuthEngineBoots.length].pack('C') + msgAuthEngineBoots +
-				INTEGER + [msgAuthEngineTime.length].pack('C') + msgAuthEngineTime +
+				INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineBoots].pack('N') +
+				INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineTime].pack('N') +
 				OCTET_STRING + [userName.length].pack('C') + userName +
 				OCTET_STRING + [msgAuthParam.length].pack('C') + msgAuthParam +
 				OCTET_STRING + [msgPrivParam.length].pack('C') + msgPrivParam
@@ -111,8 +104,29 @@ def create_probe_snmp3(msgFlags, userName, authPass, privPass, msgAuthEngineID)
 
 		snmpHead = SEQUENCE + [msg.length].pack('C')
 		puts "Msg length " + msg.length.to_s
-		snmp = snmpHead + msg
-		snmp
+		snmpMsg = snmpHead + msg
+
+		if authPass.length > 0
+			auth = OpenSSL::Digest::MD5.new
+			authKey = auth.usmHMACMD5AuthKey(authPass, msgAuthEngineID)
+			msg = OpenSSL::Digest::MD5.new
+			msgAuthParam = msg.usmHMACMD5AuthProtocol(authKey, snmpMsg)
+
+			# Now we have generated msgAuthParam we need to pack our packet again with the 
+			msgSecurityParameters   =
+				OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
+				INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineBoots].pack('N') +
+				INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineTime].pack('N') +
+				OCTET_STRING + [userName.length].pack('C') + userName +
+				OCTET_STRING + [msgAuthParam.length].pack('C') + msgAuthParam +
+				OCTET_STRING + [msgPrivParam.length].pack('C') + msgPrivParam
+
+			msg = msgVersion + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + pduHead + pdu
+
+			snmpMsg = snmpHead + msg
+		end
+
+		snmpMsg
 end
 
 def parse_reply(pkt)
@@ -134,6 +148,8 @@ def parse_reply(pkt)
 		# The usmSecurityParameter is an Octet String whose value is a BER encoded ASN1data class, so it must be unpacked
 		msgSecurityParameter = OpenSSL::ASN1.decode(asn1.value[2].value)
 		msgAuthoritativeEngineID = msgSecurityParameter.value[0].value
+		msgAuthoritiveEngineBoots = msgSecurityParameter.value[1].value.to_i
+		msgAuthoritiveEngineTime = msgSecurityParameter.value[2].value.to_i
 
 		msgData = asn1.value[3]
 		contextEngineID = msgData.value[0]
@@ -145,11 +161,17 @@ def parse_reply(pkt)
 		errorIndex = pdu.value[2]
 		varBind = pdu.value[3]
 
-		var = varBind.value[0]
-		oid = var.value[0]
-		val = var.value[1]
+		if varBind
+			var = varBind.value[0]
+			if var
+				oid = var.value[0]
+				val = var.value[1]
+			end
+		end
 
-		snmpResult = {  "msgAuthoritativeEngineID"      => msgAuthoritativeEngineID,
+		snmpResult = {  "msgAuthEngineID"		=> msgAuthoritativeEngineID,
+						"msgAuthEngineBoots"	=> msgAuthoritiveEngineBoots,
+						"msgAuthEngineTime"		=> msgAuthoritiveEngineTime,
 						"contextEngineID"       => contextEngineID,
 						"errorStatus"           => errorStatus,
 						"oid"                   => oid,
@@ -163,7 +185,7 @@ rhost = ARGV[1]
 
 udp_socket = UDPSocket.new
 
-data = create_probe_snmp3(MSG_FLAGS_REPORTABLE, "", "", "", "")
+data = create_probe_snmp3(MSG_FLAGS_REPORTABLE, "", "", "", "", 0, 0)
 
 udp_socket.bind("127.0.0.1", 4913)
 
@@ -173,7 +195,12 @@ ret, sender = udp_socket.recvfrom(65535)
 
 snmpReturn = parse_reply(ret)
 
-data = create_probe_snmp3([MSG_FLAGS_REPORTABLE.unpack('H*').join.to_i + MSG_FLAGS_AUTH.unpack('H*').join.to_i].pack('C'), "authOnlyUser", "password", "", snmpReturn["msgAuthoritativeEngineID"])
+puts snmpReturn
+
+data = create_probe_snmp3([MSG_FLAGS_REPORTABLE.unpack('H*').join.to_i +
+MSG_FLAGS_AUTH.unpack('H*').join.to_i].pack('C'), "authOnlyUser", "password",
+"", snmpReturn["msgAuthEngineID"], snmpReturn["msgAuthEngineBoots"],
+snmpReturn["msgAuthEngineTime"])
 
 udp_socket.send(data, 0, rhost, 161)
 
