@@ -13,6 +13,38 @@ class String
   end
 end
 
+class OpenSSL::Digest::SHA1
+	def usmHMACSHAAuthKey(authPass, msgAuthEngineID)
+		@count = 0
+		@password_buf = Array.new(64)
+		@digest_buf = Array.new(72)
+		@authPassKey = OpenSSL::Digest::SHA1.new
+
+		until @count >= 1048576 do
+			@authPassKey << @password_buf.each_with_index.map{ |el,idx| authPass[idx % authPass.length] }.join
+			@count += 64
+		end
+
+		@digest_buf = [(@authPassKey.digest.unpack('C*') + msgAuthEngineID.unpack('C*') + @authPassKey.digest.unpack('C*')).pack('C*')]
+
+		self << @digest_buf.join
+		self.digest
+	end
+
+	def usmHMACSHAAuthProtocol(authKey, wholeMsg)
+		@extendedAuthKey = (authKey.unpack('C*') + ["\x00" * 44].join.unpack('C*')).pack('C*')
+		@IPAD = ["\x36" * 64].join
+		@K1 = @extendedAuthKey ^ @IPAD
+		@OPAD = ["\x5C" * 64].join
+		@K2 = @extendedAuthKey ^ @OPAD
+		@shaMAC = OpenSSL::Digest::SHA1.new
+		@shaMAC << (@K1.unpack('C*') + wholeMsg.unpack('C*')).pack('C*')
+		@MAC = @shaMAC.digest
+		self << (@K2.unpack('C*') + @MAC.unpack('C*')).pack('C*')
+		self.digest[0, 12]
+	end
+end
+
 class OpenSSL::Digest::MD5
 # => A Ruby implementation of http://tools.ietf.org/html/rfc3414#appendix-A.2.1
 	def usmHMACMD5AuthKey(authPass, msgAuthEngineID)
@@ -38,9 +70,9 @@ class OpenSSL::Digest::MD5
 		@K1 = @extendedAuthKey ^ @IPAD
 		@OPAD = ["\x5C" * 64].join
 		@K2 = @extendedAuthKey ^ @OPAD
-		@MACmd5 = OpenSSL::Digest::MD5.new
-		@MACmd5 << (@K1.unpack('C*') + wholeMsg.unpack('C*')).pack('C*')
-		@MAC = @MACmd5.digest
+		@md5MAC = OpenSSL::Digest::MD5.new
+		@md5MAC << (@K1.unpack('C*') + wholeMsg.unpack('C*')).pack('C*')
+		@MAC = @md5MAC.digest
 		self << (@K2.unpack('C*') + @MAC.unpack('C*')).pack('C*')
 		self.digest[0, 12]
 	end
@@ -66,67 +98,79 @@ MSG_ID                  = "\x01"
 MSG_MAX_SIZE            = "\x20\x00"    # 8192
 MSG_SECURITY_MODEL      = "\x03"        # usmSecurityModel
 
-def create_probe_snmp3(msgFlags, userName, authPass, privPass, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime)
-		msgPrivParam = ""
-		msgAuthParam = ["\x00" * 12].join
+def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privProto, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime)
+	msgPrivParam = ""
+	msgAuthParam = ["\x00" * 12].join
 
-		pdu =
-			OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
-			"\x04\x00\xa0\x0e\x02\x04\x0e\xf0" + "\xee\x8f\x02\x01\x00\x02\x01\x00" +
-			"\x30\x00"
-		pduHead = SEQUENCE + [pdu.length].pack('C')
+	pdu =
+		OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
+		"\x04\x00\xa0\x0e\x02\x04\x0e\xf0" + "\xee\x8f\x02\x01\x00\x02\x01\x00" +
+		"\x30\x00"
+	pduHead = SEQUENCE + [pdu.length].pack('C')
 
-		msgGlobalData =
-				INTEGER + [MSG_ID.length].pack('C') + MSG_ID +
-				INTEGER + [MSG_MAX_SIZE.length].pack('C') + MSG_MAX_SIZE +
-				OCTET_STRING + [msgFlags.length].pack('C') + msgFlags +
-				INTEGER + [MSG_SECURITY_MODEL.length].pack('C') + MSG_SECURITY_MODEL
-		msgGlobalHead = SEQUENCE + [msgGlobalData.length].pack('C')
+	msgGlobalData =
+		INTEGER + [MSG_ID.length].pack('C') + MSG_ID +
+		INTEGER + [MSG_MAX_SIZE.length].pack('C') + MSG_MAX_SIZE +
+		OCTET_STRING + [msgFlags.length].pack('C') + msgFlags +
+		INTEGER + [MSG_SECURITY_MODEL.length].pack('C') + MSG_SECURITY_MODEL
+	msgGlobalHead = SEQUENCE + [msgGlobalData.length].pack('C')
 
-		msgSecurityParameters   =
-				OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
-				INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineBoots].pack('N') +
-				INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineTime].pack('N') +
-				OCTET_STRING + [userName.length].pack('C') + userName +
-				OCTET_STRING + [msgAuthParam.length].pack('C') + msgAuthParam +
-				OCTET_STRING + [msgPrivParam.length].pack('C') + msgPrivParam
-		msgSecurityHead         =
-				OCTET_STRING + [msgSecurityParameters.length + 2].pack('C') +
-				SEQUENCE + [msgSecurityParameters.length].pack('C')
+	msgSecurityParameters   =
+		OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
+		INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineBoots].pack('N') +
+		INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineTime].pack('N') +
+		OCTET_STRING + [userName.length].pack('C') + userName +
+		OCTET_STRING + [msgAuthParam.length].pack('C') + msgAuthParam +
+		OCTET_STRING + [msgPrivParam.length].pack('C') + msgPrivParam
+	msgSecurityHead         =
+		OCTET_STRING + [msgSecurityParameters.length + 2].pack('C') +
+		SEQUENCE + [msgSecurityParameters.length].pack('C')
 
 #		pdu =
 #				"\x30\x12\x04\x00\x04\x00\xa0\x0c\x02\x02\x13\x89\x02\x01" +
 #				"\x00\x02\x01\x00\x30\x00"
 
-		msgVersion = "\x02\x01\x03"
+	msgVersion = "\x02\x01\x03"
 
-		msg = msgVersion + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + pduHead + pdu
+	msg = msgVersion + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + pduHead + pdu
 
-		snmpHead = SEQUENCE + [msg.length].pack('C')
-		puts "Msg length " + msg.length.to_s
-		snmpMsg = snmpHead + msg
+	snmpHead = SEQUENCE + [msg.length].pack('C')
+	puts "Msg length " + msg.length.to_s
+	snmpMsg = snmpHead + msg
 
-		if authPass.length > 0
+	if msgFlags.unpack('H*').join.to_i.odd?
+		if ((authProto <=> "MD5") == 0)
 			auth = OpenSSL::Digest::MD5.new
 			authKey = auth.usmHMACMD5AuthKey(authPass, msgAuthEngineID)
 			msg = OpenSSL::Digest::MD5.new
 			msgAuthParam = msg.usmHMACMD5AuthProtocol(authKey, snmpMsg)
-
-			# Now we have generated msgAuthParam we need to pack our packet again with the 
-			msgSecurityParameters   =
-				OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
-				INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineBoots].pack('N') +
-				INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineTime].pack('N') +
-				OCTET_STRING + [userName.length].pack('C') + userName +
-				OCTET_STRING + [msgAuthParam.length].pack('C') + msgAuthParam +
-				OCTET_STRING + [msgPrivParam.length].pack('C') + msgPrivParam
-
-			msg = msgVersion + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + pduHead + pdu
-
-			snmpMsg = snmpHead + msg
+		elsif ((authProto <=> "SHA") == 0)
+			auth = OpenSSL::Digest::SHA1.new
+			authKey = auth.usmHMACSHAAuthKey(authPass, msgAuthEngineID)
+			puts authKey.unpack('H*')
+			msg = OpenSSL::Digest::SHA1.new
+			msgAuthParam = msg.usmHMACSHAAuthProtocol(authKey, snmpMsg)
+			puts msgAuthParam.unpack('H*')
+		else
+			puts "Authentication protocl must be MD5 or SHA"
+			return nil
 		end
 
-		snmpMsg
+		# Now we have generated msgAuthParam we need to pack our packet again with the msgAuthParam value
+		msgSecurityParameters   =
+			OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
+			INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineBoots].pack('N') +
+			INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineTime].pack('N') +
+			OCTET_STRING + [userName.length].pack('C') + userName +
+			OCTET_STRING + [msgAuthParam.length].pack('C') + msgAuthParam +
+			OCTET_STRING + [msgPrivParam.length].pack('C') + msgPrivParam
+
+		msg = msgVersion + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + pduHead + pdu
+
+		snmpMsg = snmpHead + msg
+	end
+
+	snmpMsg
 end
 
 def parse_reply(pkt)
@@ -185,7 +229,7 @@ rhost = ARGV[1]
 
 udp_socket = UDPSocket.new
 
-data = create_probe_snmp3(MSG_FLAGS_REPORTABLE, "", "", "", "", 0, 0)
+data = create_probe_snmp3(MSG_FLAGS_REPORTABLE, "", "", "", "", "", "", 0, 0)
 
 udp_socket.bind("127.0.0.1", 4913)
 
@@ -197,10 +241,14 @@ snmpReturn = parse_reply(ret)
 
 puts snmpReturn
 
-data = create_probe_snmp3([MSG_FLAGS_REPORTABLE.unpack('H*').join.to_i +
-MSG_FLAGS_AUTH.unpack('H*').join.to_i].pack('C'), "authOnlyUser", "password",
-"", snmpReturn["msgAuthEngineID"], snmpReturn["msgAuthEngineBoots"],
-snmpReturn["msgAuthEngineTime"])
+data =
+	create_probe_snmp3(
+		[MSG_FLAGS_REPORTABLE.unpack('H*').join.to_i + MSG_FLAGS_AUTH.unpack('H*').join.to_i].pack('C'), 	# msgFlags
+		"authOnlyUser",																						# user Name
+		"password", "SHA",																					# authPass, authProto
+		"", "", 																							# privPass, privProto
+		snmpReturn["msgAuthEngineID"], snmpReturn["msgAuthEngineBoots"], snmpReturn["msgAuthEngineTime"]	#
+	)
 
 udp_socket.send(data, 0, rhost, 161)
 
