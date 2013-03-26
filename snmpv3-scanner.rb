@@ -14,6 +14,7 @@ class String
 end
 
 class OpenSSL::Digest::SHA1
+# => Ruby implementation of http://tools.ietf.org/html/rfc3414#appendix-A.2.2
 	def usmHMACSHAAuthKey(authPass, msgAuthEngineID)
 		@count = 0
 		@password_buf = Array.new(64)
@@ -31,6 +32,7 @@ class OpenSSL::Digest::SHA1
 		self.digest
 	end
 
+# => http://tools.ietf.org/html/rfc3414#section-7.3.1
 	def usmHMACSHAAuthProtocol(authKey, wholeMsg)
 		@extendedAuthKey = (authKey.unpack('C*') + ["\x00" * 44].join.unpack('C*')).pack('C*')
 		@IPAD = ["\x36" * 64].join
@@ -75,6 +77,21 @@ class OpenSSL::Digest::MD5
 		@MAC = @md5MAC.digest
 		self << (@K2.unpack('C*') + @MAC.unpack('C*')).pack('C*')
 		self.digest[0, 12]
+	end
+end
+
+class OpenSSL::Cipher
+# => http://tools.ietf.org/html/rfc3414#section-8.1.1.1
+	def usmDESPrivKey(privPass, msgAuthEngineBoots)
+		desKey = privPass[0,8]
+		@preIV = privPass[8,16]
+		@rand = Random.new
+		salt = (msgAuthEngineBoots.to_s[0,4] + @rand.bytes(4))
+		iv = (salt ^ @preIV)
+		[iv, desKey, salt]
+	end
+# => http://tools.ietf.org/html/rfc3414#section-8.1.1.2
+	def usmDESPrivProtocol(cryptKey, scopedPDU)
 	end
 end
 
@@ -152,7 +169,7 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 			msgAuthParam = msg.usmHMACSHAAuthProtocol(authKey, snmpMsg)
 			puts msgAuthParam.unpack('H*')
 		else
-			puts "Authentication protocl must be MD5 or SHA"
+			puts "Authentication protocol must be MD5 or SHA"
 			return nil
 		end
 
@@ -164,10 +181,40 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 			OCTET_STRING + [userName.length].pack('C') + userName +
 			OCTET_STRING + [msgAuthParam.length].pack('C') + msgAuthParam +
 			OCTET_STRING + [msgPrivParam.length].pack('C') + msgPrivParam
+		msgSecurityHead         =
+			OCTET_STRING + [msgSecurityParameters.length + 2].pack('C') +
+			SEQUENCE + [msgSecurityParameters.length].pack('C')
+
 
 		msg = msgVersion + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + pduHead + pdu
 
 		snmpMsg = snmpHead + msg
+	end
+
+	if msgFlags.unpack('H*').join.to_i == 3 || msgFlags.unpack('H*').join.to_i == 7
+		if((privProto <=> DES) == 0)
+			scopedPDU = pduHead + pdu + "\x64" * (8 - ((pduHead + pdu).length % 8))
+			
+			crypt = OpenSSL::Cipher.new
+			[iv, desKey, msgPrivParam] = crypt.usmDESPrivKey(privPass, msgAuthEngineBoots)
+			crypt = OpenSSL::Cipher.new
+			encryptedPDU = crypt.usmDESPrivProtocol(deskey, iv, scopedPDU)
+
+			# Now we have generated msgPrivParam we need to pack our packet again with the msgAuthParam value
+			msgSecurityParameters   =
+				OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
+				INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineBoots].pack('N') +
+				INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineTime].pack('N') +
+				OCTET_STRING + [userName.length].pack('C') + userName +
+				OCTET_STRING + [msgAuthParam.length].pack('C') + msgAuthParam +
+				OCTET_STRING + [msgPrivParam.length].pack('C') + msgPrivParam
+			msgSecurityHead         =
+				OCTET_STRING + [msgSecurityParameters.length + 2].pack('C') +
+				SEQUENCE + [msgSecurityParameters.length].pack('C')
+
+			cipher = OpenSSL::Cipher.new("DES-CBC")
+			cipherText = cypher.usmDESPrivProtocol(IV, scopedPDU)
+		end
 	end
 
 	snmpMsg
@@ -246,7 +293,7 @@ data =
 		[MSG_FLAGS_REPORTABLE.unpack('H*').join.to_i + MSG_FLAGS_AUTH.unpack('H*').join.to_i].pack('C'), 	# msgFlags
 		"authOnlyUser",																						# user Name
 		"password", "SHA",																					# authPass, authProto
-		"", "", 																							# privPass, privProto
+		"passwordpassword", "DES", 																			# privPass, privProto
 		snmpReturn["msgAuthEngineID"], snmpReturn["msgAuthEngineBoots"], snmpReturn["msgAuthEngineTime"]	#
 	)
 
