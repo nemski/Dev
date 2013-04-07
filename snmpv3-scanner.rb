@@ -2,6 +2,8 @@
 require 'openssl'
 require 'socket'
 
+SALTLSB = Random.new.bytes(4)
+
 class String
   def ^( other )
     b1 = self.unpack("C*")
@@ -83,15 +85,30 @@ end
 class OpenSSL::Cipher
 # => http://tools.ietf.org/html/rfc3414#section-8.1.1.1
 	def usmDESPrivKey(privPass, msgAuthEngineBoots)
-		desKey = privPass[0,8]
-		@preIV = privPass[8,16]
-		@rand = Random.new
-		salt = (msgAuthEngineBoots.to_s[0,4] + @rand.bytes(4))
+		if msgAuthEngineBoots.to_s.size < 4
+			tmp = msgAuthEngineBoots
+			msgAuthEngineBoots = "0" * (4 - tmp.to_s.size) + tmp.to_s
+		end
+		desKey = privPass[0, 8]
+		@preIV = privPass[8, 16]
+		salt = (msgAuthEngineBoots.to_s[0, 4] + SALTLSB.to_s)
 		iv = (salt ^ @preIV)
 		[iv, desKey, salt]
 	end
 # => http://tools.ietf.org/html/rfc3414#section-8.1.1.2
-	def usmDESPrivProtocol(cryptKey, scopedPDU)
+	def usmDESPrivProtocol(cryptKey, iv, scopedPDU)
+		@pdu = scopedPDU + "\x64" * (scopedPDU.length % 8)
+		self.encrypt
+		self.key = cryptKey
+		self.iv = iv
+		encryptedPDU = self.update(@pdu) + self.final
+		encryptedPDU
+	end
+end
+
+class HexString
+	def initialize(x)
+		[x].pack('C')
 	end
 end
 
@@ -105,10 +122,10 @@ SEQUENCE                = "\x30"
 
 # msgFlags
 
-MSG_FLAGS_NOAUTHNOPRIV  = "\x00"  # noAuthNoPriv
-MSG_FLAGS_AUTH          = "\x01"  # authFlag
-MSG_FLAGS_PRIV          = "\x02"  # privFlag
-MSG_FLAGS_REPORTABLE    = "\x04"  # reportableFlag
+MSG_FLAGS_NOAUTHNOPRIV  = 0  # noAuthNoPriv
+MSG_FLAGS_AUTH          = 1  # authFlag
+MSG_FLAGS_PRIV          = 2  # privFlag
+MSG_FLAGS_REPORTABLE    = 4  # reportableFlag
 
 # SNMPv3 defaults
 MSG_ID                  = "\x01"
@@ -143,9 +160,6 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 		OCTET_STRING + [msgSecurityParameters.length + 2].pack('C') +
 		SEQUENCE + [msgSecurityParameters.length].pack('C')
 
-#		pdu =
-#				"\x30\x12\x04\x00\x04\x00\xa0\x0c\x02\x02\x13\x89\x02\x01" +
-#				"\x00\x02\x01\x00\x30\x00"
 
 	msgVersion = "\x02\x01\x03"
 
@@ -155,6 +169,7 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 	puts "Msg length " + msg.length.to_s
 	snmpMsg = snmpHead + msg
 
+	# Authorization
 	if msgFlags.unpack('H*').join.to_i.odd?
 		if ((authProto <=> "MD5") == 0)
 			auth = OpenSSL::Digest::MD5.new
@@ -174,14 +189,14 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 		end
 
 		# Now we have generated msgAuthParam we need to pack our packet again with the msgAuthParam value
-		msgSecurityParameters   =
+		msgSecurityParameters	=
 			OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
 			INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineBoots].pack('N') +
 			INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineTime].pack('N') +
 			OCTET_STRING + [userName.length].pack('C') + userName +
 			OCTET_STRING + [msgAuthParam.length].pack('C') + msgAuthParam +
 			OCTET_STRING + [msgPrivParam.length].pack('C') + msgPrivParam
-		msgSecurityHead         =
+		msgSecurityHead			=
 			OCTET_STRING + [msgSecurityParameters.length + 2].pack('C') +
 			SEQUENCE + [msgSecurityParameters.length].pack('C')
 
@@ -191,30 +206,35 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 		snmpMsg = snmpHead + msg
 	end
 
-	if msgFlags.unpack('H*').join.to_i == 3 || msgFlags.unpack('H*').join.to_i == 7
-		if((privProto <=> DES) == 0)
-			scopedPDU = pduHead + pdu + "\x64" * (8 - ((pduHead + pdu).length % 8))
-			
-			crypt = OpenSSL::Cipher.new
-			[iv, desKey, msgPrivParam] = crypt.usmDESPrivKey(privPass, msgAuthEngineBoots)
-			crypt = OpenSSL::Cipher.new
-			encryptedPDU = crypt.usmDESPrivProtocol(deskey, iv, scopedPDU)
+	# Privacy
+	if (msgFlags.unpack('H*').join.to_i == 3 || msgFlags.unpack('H*').join.to_i == 7)
+		if((privProto <=> "DES") == 0)
+			scopedPDU = pduHead + pdu
 
-			# Now we have generated msgPrivParam we need to pack our packet again with the msgAuthParam value
-			msgSecurityParameters   =
-				OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
-				INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineBoots].pack('N') +
-				INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineTime].pack('N') +
-				OCTET_STRING + [userName.length].pack('C') + userName +
-				OCTET_STRING + [msgAuthParam.length].pack('C') + msgAuthParam +
-				OCTET_STRING + [msgPrivParam.length].pack('C') + msgPrivParam
-			msgSecurityHead         =
-				OCTET_STRING + [msgSecurityParameters.length + 2].pack('C') +
-				SEQUENCE + [msgSecurityParameters.length].pack('C')
-
-			cipher = OpenSSL::Cipher.new("DES-CBC")
-			cipherText = cypher.usmDESPrivProtocol(IV, scopedPDU)
+			crypt = OpenSSL::Cipher::DES.new("CBC")
+			iv, desKey, msgPrivParam = crypt.usmDESPrivKey(privPass, msgAuthEngineBoots)
+			crypt = OpenSSL::Cipher::DES.new("CBC")
+			encryptedPDU = crypt.usmDESPrivProtocol(desKey, iv, pdu)
 		end
+
+		# Now we have generated msgPrivParam we need to pack our packet again with the msgPrivParam value
+		msgSecurityParameters	=
+			OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
+			INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineBoots].pack('N') +
+			INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineTime].pack('N') +
+			OCTET_STRING + [userName.length].pack('C') + userName +
+			OCTET_STRING + [msgAuthParam.length].pack('C') + msgAuthParam +
+			OCTET_STRING + [msgPrivParam.length].pack('C') + msgPrivParam
+		msgSecurityHead			=
+			OCTET_STRING + [msgSecurityParameters.length + 2].pack('C') +
+			SEQUENCE + [msgSecurityParameters.length].pack('C')
+
+		pduHead = OCTET_STRING + [encryptedPDU.length].pack('C')
+		scopedPDU = pduHead + encryptedPDU
+
+		msg = msgVersion + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + scopedPDU
+
+		snmpMsg = snmpHead + msg
 	end
 
 	snmpMsg
@@ -276,7 +296,8 @@ rhost = ARGV[1]
 
 udp_socket = UDPSocket.new
 
-data = create_probe_snmp3(MSG_FLAGS_REPORTABLE, "", "", "", "", "", "", 0, 0)
+# Get our msgAuthEngine* values
+data = create_probe_snmp3([MSG_FLAGS_REPORTABLE].pack('C'), "", "", "", "", "", "", 0, 0)
 
 udp_socket.bind("127.0.0.1", 4913)
 
@@ -290,10 +311,10 @@ puts snmpReturn
 
 data =
 	create_probe_snmp3(
-		[MSG_FLAGS_REPORTABLE.unpack('H*').join.to_i + MSG_FLAGS_AUTH.unpack('H*').join.to_i].pack('C'), 	# msgFlags
-		"authOnlyUser",																						# user Name
+		[MSG_FLAGS_REPORTABLE + MSG_FLAGS_AUTH + MSG_FLAGS_PRIV].pack('C'), 	# msgFlags
+		"authPrivUser",																						# user Name
 		"password", "SHA",																					# authPass, authProto
-		"passwordpassword", "DES", 																			# privPass, privProto
+		"password", "DES", 																			# privPass, privProto
 		snmpReturn["msgAuthEngineID"], snmpReturn["msgAuthEngineBoots"], snmpReturn["msgAuthEngineTime"]	#
 	)
 
