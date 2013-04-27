@@ -7,6 +7,9 @@ SALTLSB = Random.new.bytes(4)
 class String
   def ^( other )
     b1 = self.unpack("C*")
+    if ! other
+    	return b1
+    end
     b2 = other.unpack("C*")
     longest = [b1.length,b2.length].max
     b1 = [0]*(longest-b1.length) + b1
@@ -84,12 +87,23 @@ end
 
 class OpenSSL::Cipher
 # => http://tools.ietf.org/html/rfc3414#section-8.1.1.1
+
 	def usmDESPrivKey(privPass, msgAuthEngineBoots)
 		if msgAuthEngineBoots.to_s.size < 4
 			tmp = msgAuthEngineBoots
 			msgAuthEngineBoots = "0" * (4 - tmp.to_s.size) + tmp.to_s
 		end
-		desKey = privPass[0, 8]
+
+# => desKey is meant to have "the Least Significant Bit in each octet disregarded."
+# This is only going to work on a little-endian system
+		bitstring = privPass.unpack('B*').to_s.split(//)
+		octets = bitstring.length / 8
+		while octets > 0 do
+			bitstring.delete_at(octets * 8)
+			octets -= 1
+		end
+		desKey = [bitstring.join].pack('B*')
+
 		@preIV = privPass[8, 16]
 		salt = (msgAuthEngineBoots.to_s[0, 4] + SALTLSB.to_s)
 		iv = (salt ^ @preIV)
@@ -97,11 +111,10 @@ class OpenSSL::Cipher
 	end
 # => http://tools.ietf.org/html/rfc3414#section-8.1.1.2
 	def usmDESPrivProtocol(cryptKey, iv, scopedPDU)
-		@pdu = scopedPDU + "\x64" * (scopedPDU.length % 8)
 		self.encrypt
 		self.key = cryptKey
 		self.iv = iv
-		encryptedPDU = self.update(@pdu) + self.final
+		encryptedPDU = self.update(scopedPDU) + self.final
 		encryptedPDU
 	end
 end
@@ -179,10 +192,8 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 		elsif ((authProto <=> "SHA") == 0)
 			auth = OpenSSL::Digest::SHA1.new
 			authKey = auth.usmHMACSHAAuthKey(authPass, msgAuthEngineID)
-			puts authKey.unpack('H*')
 			msg = OpenSSL::Digest::SHA1.new
 			msgAuthParam = msg.usmHMACSHAAuthProtocol(authKey, snmpMsg)
-			puts msgAuthParam.unpack('H*')
 		else
 			puts "Authentication protocol must be MD5 or SHA"
 			return nil
@@ -214,10 +225,10 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 			crypt = OpenSSL::Cipher::DES.new("CBC")
 			iv, desKey, msgPrivParam = crypt.usmDESPrivKey(privPass, msgAuthEngineBoots)
 			crypt = OpenSSL::Cipher::DES.new("CBC")
-			encryptedPDU = crypt.usmDESPrivProtocol(desKey, iv, pdu)
+			encryptedPDU = crypt.usmDESPrivProtocol(desKey, iv, scopedPDU)
 		end
 
-		# Now we have generated msgPrivParam we need to pack our packet again with the msgPrivParam value
+		# Now we have generated msgPrivParam and encryptedPDU we need to pack our packet again with the msgPrivParam value
 		msgSecurityParameters	=
 			OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
 			INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineBoots].pack('N') +
@@ -229,10 +240,14 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 			OCTET_STRING + [msgSecurityParameters.length + 2].pack('C') +
 			SEQUENCE + [msgSecurityParameters.length].pack('C')
 
-		pduHead = OCTET_STRING + [encryptedPDU.length].pack('C')
-		scopedPDU = pduHead + encryptedPDU
+		puts "msgPrivParam: " + msgPrivParam.unpack('H*').join
+		puts "encryptedPDU: " + encryptedPDU.unpack('H*').join
+		puts "iv: " + iv.unpack('H*').join
+		puts "desKey: " + desKey.unpack('H*').join
 
-		msg = msgVersion + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + scopedPDU
+		pduHead = OCTET_STRING + [encryptedPDU.length].pack('C')
+
+		msg = msgVersion + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + pduHead + encryptedPDU
 
 		snmpMsg = snmpHead + msg
 	end
