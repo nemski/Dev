@@ -213,6 +213,8 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 
 		msg = msgVersion + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + pduHead + pdu
 
+		snmpHead = SEQUENCE + [msg.length].pack('C')
+
 		snmpMsg = snmpHead + msg
 	end
 
@@ -248,9 +250,8 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 
 		msg = msgVersion + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + pduHead + encryptedPDU
 
-		snmpHead = SEQUENCE + [msg.length].pack('C')
-
-		snmpMsg = snmpHead + msg
+		# Here we include the msg length unecrypted (in snmpHead) and encrypted (calculated using msg.length)
+		snmpMsg = snmpHead + [msg.length].pack('C') + msg
 	end
 
 	snmpMsg
