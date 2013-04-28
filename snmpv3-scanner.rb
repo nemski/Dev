@@ -328,7 +328,7 @@ data =
 	create_probe_snmp3(
 		[MSG_FLAGS_REPORTABLE + MSG_FLAGS_AUTH + MSG_FLAGS_PRIV].pack('C'), 	# msgFlags
 		"authPrivUser",																						# user Name
-		"password", "SHA",																					# authPass, authProto
+		"password", "MD5",																					# authPass, authProto
 		"password", "DES", 																			# privPass, privProto
 		snmpReturn["msgAuthEngineID"], snmpReturn["msgAuthEngineBoots"], snmpReturn["msgAuthEngineTime"]	#
 	)
