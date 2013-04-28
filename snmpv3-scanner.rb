@@ -99,7 +99,7 @@ class OpenSSL::Cipher
 		bitstring = privPass.unpack('B*').to_s.split(//)
 		octets = bitstring.length / 8
 		while octets > 0 do
-			bitstring.delete_at(octets * 8)
+			bitstring.delete_at((octets * 8) - 1)
 			octets -= 1
 		end
 		desKey = [bitstring.join].pack('B*')
