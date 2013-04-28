@@ -141,11 +141,11 @@ MSG_FLAGS_REPORTABLE    = 4  # reportableFlag
 
 # SNMPv3 defaults
 MSG_ID                  = "\x01"
-MSG_MAX_SIZE            = "\x20\x00"    # 8192
+MSG_MAX_SIZE            = "\x00\xFF\xE3"    # 65507
 MSG_SECURITY_MODEL      = "\x03"        # usmSecurityModel
 
 def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privProto, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime)
-	msgPrivParam = ""
+	msgPrivParam = ["\x00" * 8].join
 	msgAuthParam = ["\x00" * 12].join
 
 	pdu =
