@@ -114,8 +114,7 @@ class OpenSSL::Cipher
 		self.encrypt
 		self.key = cryptKey
 		self.iv = iv
-		encryptedPDU = self.update(scopedPDU) + self.final
-		encryptedPDU
+		self.update(scopedPDU) + self.final
 	end
 end
 
@@ -245,9 +244,11 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 		puts "iv: " + iv.unpack('H*').join
 		puts "desKey: " + desKey.unpack('H*').join
 
-		pduHead = OCTET_STRING + [encryptedPDU.length].pack('C')
+		pduHead =	OCTET_STRING + [encryptedPDU.length].pack('C')
 
 		msg = msgVersion + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + pduHead + encryptedPDU
+
+		snmpHead = SEQUENCE + [msg.length].pack('C')
 
 		snmpMsg = snmpHead + msg
 	end
