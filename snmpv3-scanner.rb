@@ -38,14 +38,15 @@ class OpenSSL::Digest::SHA1
 	end
 
 # => http://tools.ietf.org/html/rfc3414#section-7.3.1
-	def usmHMACSHAAuthProtocol(authKey, wholeMsg)
-		@extendedAuthKey = (authKey.unpack('C*') + ["\x00" * 44].join.unpack('C*')).pack('C*')
+	def usmHMACSHAAuthProtocol(authKey, snmpMsg)
+		(@authKey, @snmpMsg) = authKey, snmpMsg
+		@extendedAuthKey = (@authKey.unpack('C*') + ["\x00" * 44].join.unpack('C*')).pack('C*')
 		@IPAD = ["\x36" * 64].join
 		@K1 = @extendedAuthKey ^ @IPAD
 		@OPAD = ["\x5C" * 64].join
 		@K2 = @extendedAuthKey ^ @OPAD
 		@shaMAC = OpenSSL::Digest::SHA1.new
-		@shaMAC << (@K1.unpack('C*') + wholeMsg.unpack('C*')).pack('C*')
+		@shaMAC << (@K1.unpack('C*') + @snmpMsg.unpack('C*')).pack('C*')
 		@MAC = @shaMAC.digest
 		self << (@K2.unpack('C*') + @MAC.unpack('C*')).pack('C*')
 		self.digest[0, 12]
@@ -89,23 +90,24 @@ class OpenSSL::Cipher
 # => http://tools.ietf.org/html/rfc3414#section-8.1.1.1
 
 	def usmDESPrivKey(privPass, msgAuthEngineBoots)
-		if msgAuthEngineBoots.to_s.size < 4
-			tmp = msgAuthEngineBoots
-			msgAuthEngineBoots = "0" * (4 - tmp.to_s.size) + tmp.to_s
+		(@privPass, @msgAuthEngineBoots) = privPass, msgAuthEngineBoots
+		if @msgAuthEngineBoots.to_s.size < 4
+			@tmp = @msgAuthEngineBoots
+			@msgAuthEngineBoots = NULL * (4 - @tmp.to_s.size) + [@tmp.to_s].pack('h')
 		end
 
 # => desKey is meant to have "the Least Significant Bit in each octet disregarded."
 # This is only going to work on a little-endian system
-		bitstring = privPass.unpack('B*').to_s.split(//)
-		octets = bitstring.length / 8
-		while octets > 0 do
-			bitstring.delete_at((octets * 8) - 1)
-			octets -= 1
+		@bitstring = @privPass.unpack('B*').to_s.split(//)
+		@octets = @bitstring.length / 8
+		while @octets > 0 do
+			@bitstring.delete_at((@octets * 8) - 1)
+			@octets -= 1
 		end
-		desKey = [bitstring.join].pack('B*')
+		desKey = [@bitstring.join].pack('B*')
 
-		@preIV = privPass[8, 16]
-		salt = (msgAuthEngineBoots.to_s[0, 4] + SALTLSB.to_s)
+		@preIV = @privPass[4, 8]
+		salt = (@msgAuthEngineBoots[0,4] + SALTLSB.to_s)
 		iv = (salt ^ @preIV)
 		[iv, desKey, salt]
 	end
@@ -118,6 +120,13 @@ class OpenSSL::Cipher
 	end
 end
 
+class Snmpv3Msg
+	def initialize(userName, authPass, authProto, privPass, privProto, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime)
+		@userName, @authPass, @authProto, @privPass, @privProto, @msgAuthEngineID, @msgAuthEngineBoots, @msgAuthEngineTime = userName, authPass, authProto, privPass, privProto, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime
+	end
+
+end
+
 class HexString
 	def initialize(x)
 		[x].pack('C')
@@ -128,7 +137,7 @@ end
 
 INTEGER                 = "\x02"
 OCTET_STRING            = "\x04"
-NULL                    = "\x05"
+NULL                    = "\x00"
 OBJECT_IDENTIFIER       = "\x06"
 SEQUENCE                = "\x30"
 
@@ -140,19 +149,65 @@ MSG_FLAGS_PRIV          = 2  # privFlag
 MSG_FLAGS_REPORTABLE    = 4  # reportableFlag
 
 # SNMPv3 defaults
-MSG_ID                  = "\x01"
+MSG_ID                  = "\x01\x98\x6b\xd0"
 MSG_MAX_SIZE            = "\x00\xFF\xE3"    # 65507
 MSG_SECURITY_MODEL      = "\x03"        # usmSecurityModel
+MSG_VERSION = "\x02\x01\x03"
 
 def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privProto, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime)
-	msgPrivParam = ["\x00" * 8].join
+	msgPrivParam = ""
 	msgAuthParam = ["\x00" * 12].join
 
 	pdu =
 		OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
-		"\x04\x00\xa0\x0e\x02\x04\x0e\xf0" + "\xee\x8f\x02\x01\x00\x02\x01\x00" +
-		"\x30\x00"
-	pduHead = SEQUENCE + [pdu.length].pack('C')
+		"\x04\x00" + "\xa1\x1b\x02\x04\x07\xcf\xc6\xa1\x02\x01\x00\x02\x01\x00" + 
+		"\x30\x0d\x30\x0b\x06\x07\x2b\x06\x01\x02\x01\x01\x01\x05\x00"
+
+	scopedPDU = SEQUENCE + [pdu.length].pack('C') + pdu
+
+	# Privacy
+	if (msgFlags.unpack('H*').join.to_i == 3 || msgFlags.unpack('H*').join.to_i == 7)
+		if((privProto <=> "DES") == 0)
+			crypt = OpenSSL::Cipher::DES.new("CBC")
+			iv, desKey, msgPrivParam = crypt.usmDESPrivKey(privPass, msgAuthEngineBoots)
+			crypt = OpenSSL::Cipher::DES.new("CBC")
+			encryptedPDU = crypt.usmDESPrivProtocol(desKey, iv, scopedPDU)
+		end
+
+		puts "msgAuthEngineBoots: " + msgAuthEngineBoots.to_s
+		puts "msgPrivParam: " + msgPrivParam.unpack('H*').join
+		puts "encryptedPDU: " + encryptedPDU.unpack('H*').join
+		puts "iv: " + iv.unpack('H*').join
+		puts "desKey: " + desKey.unpack('H*').join
+
+		scopedPDU = OCTET_STRING + [encryptedPDU.length].pack('C') + encryptedPDU
+	end
+
+	# Authorization
+	if msgFlags.unpack('H*').join.to_i.odd?
+		if ((authProto <=> "MD5") == 0)
+			auth = OpenSSL::Digest::MD5.new
+			authKey = auth.usmHMACMD5AuthKey(authPass, msgAuthEngineID)
+			msg = OpenSSL::Digest::MD5.new
+			snmpMsg = gen_snmpMsg(msgFlags, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime, userName, msgAuthParam, msgPrivParam, scopedPDU)
+			msgAuthParam = msg.usmHMACMD5AuthProtocol(authKey, snmpMsg)
+		elsif ((authProto <=> "SHA") == 0)
+			auth = OpenSSL::Digest::SHA1.new
+			authKey = auth.usmHMACSHAAuthKey(authPass, msgAuthEngineID)
+			msg = OpenSSL::Digest::SHA1.new
+			msgAuthParam = msg.usmHMACSHAAuthProtocol(authKey, snmpMsg)
+		else
+			puts "Authentication protocol must be MD5 or SHA"
+			return nil
+		end
+	end
+	
+	snmpMsg = gen_snmpMsg(msgFlags, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime, userName, msgAuthParam, msgPrivParam, scopedPDU)
+	puts "Msg length " + snmpMsg.length.to_s
+	snmpMsg
+end
+
+def gen_snmpMsg(msgFlags, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime, userName, msgAuthParam, msgPrivParam, scopedPDU)
 
 	msgGlobalData =
 		INTEGER + [MSG_ID.length].pack('C') + MSG_ID +
@@ -164,7 +219,7 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 	msgSecurityParameters   =
 		OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
 		INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineBoots].pack('N') +
-		INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineTime].pack('N') +
+		INTEGER + [[msgAuthEngineTime].pack('N').length].pack('C') + [msgAuthEngineTime].pack('N') +
 		OCTET_STRING + [userName.length].pack('C') + userName +
 		OCTET_STRING + [msgAuthParam.length].pack('C') + msgAuthParam +
 		OCTET_STRING + [msgPrivParam.length].pack('C') + msgPrivParam
@@ -172,90 +227,20 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 		OCTET_STRING + [msgSecurityParameters.length + 2].pack('C') +
 		SEQUENCE + [msgSecurityParameters.length].pack('C')
 
+	puts "msgSecurityHead: " + msgSecurityHead.unpack('H*').join
 
-	msgVersion = "\x02\x01\x03"
+	msg = MSG_VERSION + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + scopedPDU
 
-	msg = msgVersion + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + pduHead + pdu
-
-	snmpHead = SEQUENCE + [msg.length].pack('C')
-	puts "Msg length " + msg.length.to_s
-	snmpMsg = snmpHead + msg
-
-	# Authorization
-	if msgFlags.unpack('H*').join.to_i.odd?
-		if ((authProto <=> "MD5") == 0)
-			auth = OpenSSL::Digest::MD5.new
-			authKey = auth.usmHMACMD5AuthKey(authPass, msgAuthEngineID)
-			msg = OpenSSL::Digest::MD5.new
-			msgAuthParam = msg.usmHMACMD5AuthProtocol(authKey, snmpMsg)
-		elsif ((authProto <=> "SHA") == 0)
-			auth = OpenSSL::Digest::SHA1.new
-			authKey = auth.usmHMACSHAAuthKey(authPass, msgAuthEngineID)
-			msg = OpenSSL::Digest::SHA1.new
-			msgAuthParam = msg.usmHMACSHAAuthProtocol(authKey, snmpMsg)
-		else
-			puts "Authentication protocol must be MD5 or SHA"
-			return nil
-		end
-
-		# Now we have generated msgAuthParam we need to pack our packet again with the msgAuthParam value
-		msgSecurityParameters	=
-			OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
-			INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineBoots].pack('N') +
-			INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineTime].pack('N') +
-			OCTET_STRING + [userName.length].pack('C') + userName +
-			OCTET_STRING + [msgAuthParam.length].pack('C') + msgAuthParam +
-			OCTET_STRING + [msgPrivParam.length].pack('C') + msgPrivParam
-		msgSecurityHead			=
-			OCTET_STRING + [msgSecurityParameters.length + 2].pack('C') +
-			SEQUENCE + [msgSecurityParameters.length].pack('C')
-
-
-		msg = msgVersion + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + pduHead + pdu
-
+	if msgPrivParam != ""
+		snmpHead = SEQUENCE + [msg.length - msgPrivParam.length].pack('C') + [msg.length].pack('C')
+	else
 		snmpHead = SEQUENCE + [msg.length].pack('C')
-
-		snmpMsg = snmpHead + msg
 	end
-
-	# Privacy
-	if (msgFlags.unpack('H*').join.to_i == 3 || msgFlags.unpack('H*').join.to_i == 7)
-		if((privProto <=> "DES") == 0)
-			scopedPDU = pduHead + pdu
-
-			crypt = OpenSSL::Cipher::DES.new("CBC")
-			iv, desKey, msgPrivParam = crypt.usmDESPrivKey(privPass, msgAuthEngineBoots)
-			crypt = OpenSSL::Cipher::DES.new("CBC")
-			encryptedPDU = crypt.usmDESPrivProtocol(desKey, iv, scopedPDU)
-		end
-
-		# Now we have generated msgPrivParam and encryptedPDU we need to pack our packet again with the msgPrivParam value
-		msgSecurityParameters	=
-			OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
-			INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineBoots].pack('N') +
-			INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineTime].pack('N') +
-			OCTET_STRING + [userName.length].pack('C') + userName +
-			OCTET_STRING + [msgAuthParam.length].pack('C') + msgAuthParam +
-			OCTET_STRING + [msgPrivParam.length].pack('C') + msgPrivParam
-		msgSecurityHead			=
-			OCTET_STRING + [msgSecurityParameters.length + 2].pack('C') +
-			SEQUENCE + [msgSecurityParameters.length].pack('C')
-
-		puts "msgPrivParam: " + msgPrivParam.unpack('H*').join
-		puts "encryptedPDU: " + encryptedPDU.unpack('H*').join
-		puts "iv: " + iv.unpack('H*').join
-		puts "desKey: " + desKey.unpack('H*').join
-
-		pduHead =	OCTET_STRING + [encryptedPDU.length].pack('C')
-
-		msg = msgVersion + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + pduHead + encryptedPDU
-
-		# Here we include the msg length unecrypted (in snmpHead) and encrypted (calculated using msg.length)
-		snmpMsg = snmpHead + [msg.length].pack('C') + msg
-	end
-
+	
+	snmpMsg = snmpHead + msg
 	snmpMsg
 end
+
 
 def parse_reply(pkt)
 		return if not pkt[1]
@@ -275,9 +260,10 @@ def parse_reply(pkt)
 
 		# The usmSecurityParameter is an Octet String whose value is a BER encoded ASN1data class, so it must be unpacked
 		msgSecurityParameter = OpenSSL::ASN1.decode(asn1.value[2].value)
-		msgAuthoritativeEngineID = msgSecurityParameter.value[0].value
+		msgAuthoritiveEngineID = msgSecurityParameter.value[0].value
 		msgAuthoritiveEngineBoots = msgSecurityParameter.value[1].value.to_i
 		msgAuthoritiveEngineTime = msgSecurityParameter.value[2].value.to_i
+		puts "msgAuthoritiveEngineTime: #{msgAuthoritiveEngineTime}"
 
 		msgData = asn1.value[3]
 		contextEngineID = msgData.value[0]
@@ -297,7 +283,7 @@ def parse_reply(pkt)
 			end
 		end
 
-		snmpResult = {  "msgAuthEngineID"		=> msgAuthoritativeEngineID,
+		snmpResult = {  "msgAuthEngineID"		=> msgAuthoritiveEngineID,
 						"msgAuthEngineBoots"	=> msgAuthoritiveEngineBoots,
 						"msgAuthEngineTime"		=> msgAuthoritiveEngineTime,
 						"contextEngineID"       => contextEngineID,
