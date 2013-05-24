@@ -5,6 +5,7 @@ require 'socket'
 SALTLSB = Random.new.bytes(4)
 
 class String
+# Bitwise XOR operator for the String class
   def ^( other )
     b1 = self.unpack("C*")
     if ! other
@@ -18,7 +19,7 @@ class String
   end
 end
 
-class OpenSSL::Digest::SHA1
+class OpenSSL::Digest::SHA1_USM > OpenSSL::Digest::SHA1
 # => Ruby implementation of http://tools.ietf.org/html/rfc3414#appendix-A.2.2
 	def usmHMACSHAAuthKey(authPass, msgAuthEngineID)
 		@count = 0
@@ -53,7 +54,7 @@ class OpenSSL::Digest::SHA1
 	end
 end
 
-class OpenSSL::Digest::MD5
+class OpenSSL::Digest::MD5_USM > OpenSSL::Digest::MD5
 # => A Ruby implementation of http://tools.ietf.org/html/rfc3414#appendix-A.2.1
 	def usmHMACMD5AuthKey(authPass, msgAuthEngineID)
 		@count = 0
@@ -86,9 +87,8 @@ class OpenSSL::Digest::MD5
 	end
 end
 
-class OpenSSL::Cipher
+class OpenSSL::DES_USM > OpenSSL::Cipher::DES
 # => http://tools.ietf.org/html/rfc3414#section-8.1.1.1
-
 	def usmDESPrivKey(privPass, msgAuthEngineBoots)
 		(@privPass, @msgAuthEngineBoots) = privPass, msgAuthEngineBoots
 		if @msgAuthEngineBoots.to_s.size < 4
@@ -96,8 +96,7 @@ class OpenSSL::Cipher
 			@msgAuthEngineBoots = NULL * (4 - @tmp.to_s.size) + [@tmp.to_s].pack('h')
 		end
 
-# => desKey is meant to have "the Least Significant Bit in each octet disregarded."
-# This is only going to work on a little-endian system
+# => desKey is has "the Least Significant Bit in each octet disregarded."
 		@bitstring = @privPass.unpack('B*').to_s.split(//)
 		@octets = @bitstring.length / 8
 		while @octets > 0 do
@@ -117,19 +116,6 @@ class OpenSSL::Cipher
 		self.key = cryptKey
 		self.iv = iv
 		self.update(scopedPDU) + self.final
-	end
-end
-
-class Snmpv3Msg
-	def initialize(userName, authPass, authProto, privPass, privProto, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime)
-		@userName, @authPass, @authProto, @privPass, @privProto, @msgAuthEngineID, @msgAuthEngineBoots, @msgAuthEngineTime = userName, authPass, authProto, privPass, privProto, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime
-	end
-
-end
-
-class HexString
-	def initialize(x)
-		[x].pack('C')
 	end
 end
 
@@ -168,9 +154,9 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 	# Privacy
 	if (msgFlags.unpack('H*').join.to_i == 3 || msgFlags.unpack('H*').join.to_i == 7)
 		if((privProto <=> "DES") == 0)
-			crypt = OpenSSL::Cipher::DES.new("CBC")
+			crypt = OpenSSL::Cipher::DES_USM.new("CBC")
 			iv, desKey, msgPrivParam = crypt.usmDESPrivKey(privPass, msgAuthEngineBoots)
-			crypt = OpenSSL::Cipher::DES.new("CBC")
+			crypt = OpenSSL::Cipher::DES_USM.new("CBC")
 			encryptedPDU = crypt.usmDESPrivProtocol(desKey, iv, scopedPDU)
 		end
 
@@ -186,15 +172,15 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 	# Authorization
 	if msgFlags.unpack('H*').join.to_i.odd?
 		if ((authProto <=> "MD5") == 0)
-			auth = OpenSSL::Digest::MD5.new
+			auth = OpenSSL::Digest::MD5_USM.new
 			authKey = auth.usmHMACMD5AuthKey(authPass, msgAuthEngineID)
-			msg = OpenSSL::Digest::MD5.new
+			msg = OpenSSL::Digest::MD5_USM.new
 			snmpMsg = gen_snmpMsg(msgFlags, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime, userName, msgAuthParam, msgPrivParam, scopedPDU)
 			msgAuthParam = msg.usmHMACMD5AuthProtocol(authKey, snmpMsg)
 		elsif ((authProto <=> "SHA") == 0)
-			auth = OpenSSL::Digest::SHA1.new
+			auth = OpenSSL::Digest::SHA1_USM.new
 			authKey = auth.usmHMACSHAAuthKey(authPass, msgAuthEngineID)
-			msg = OpenSSL::Digest::SHA1.new
+			msg = OpenSSL::Digest::SHA1_USM.new
 			msgAuthParam = msg.usmHMACSHAAuthProtocol(authKey, snmpMsg)
 		else
 			puts "Authentication protocol must be MD5 or SHA"
@@ -217,18 +203,18 @@ def gen_snmpMsg(msgFlags, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime
 	]
 
 	msgSecurityParameters   = [
-		OpenSSL::ASN1.OctetString(msgAuthEngineID),
-		OpenSSL::ASN1.Integer(msgAuthEngineBoots),
-		OpenSSL::ASN1.Integer(msgAuthEngineTime),
-		OpenSSL::ASN1.OctetString(userName),
-		OpenSSL::ASN1.OctetString(msgAuthParam),
-		OpenSSL::ASN1.OctetString(msgPrivParam),
+		OpenSSL::ASN1::OctetString(msgAuthEngineID),
+		OpenSSL::ASN1::Integer(msgAuthEngineBoots),
+		OpenSSL::ASN1::Integer(msgAuthEngineTime),
+		OpenSSL::ASN1::OctetString(userName),
+		OpenSSL::ASN1::OctetString(msgAuthParam),
+		OpenSSL::ASN1::OctetString(msgPrivParam),
 	]
 
-	msg = [ OpenSSL::ASN1.Integer(MSG_VERSION), OpenSSL::ASN1.Sequence(msgGlobalData), 
-	OpenSSL::ASN1.OctetString(OpenSSL::ASN1.Sequence(msgSecurityParameters).to_der), scopedPDU ]
+	msg = [ OpenSSL::ASN1::Integer(MSG_VERSION), OpenSSL::ASN1::Sequence(msgGlobalData), 
+	OpenSSL::ASN1::OctetString(OpenSSL::ASN1::Sequence(msgSecurityParameters).to_der), scopedPDU ]
 	
-	wholeMsg = OpenSSL::ASN1.Sequence(msg).to_der
+	wholeMsg = OpenSSL::ASN1::Sequence(msg).to_der
 end
 
 
