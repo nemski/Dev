@@ -149,21 +149,21 @@ MSG_FLAGS_PRIV          = 2  # privFlag
 MSG_FLAGS_REPORTABLE    = 4  # reportableFlag
 
 # SNMPv3 defaults
-MSG_ID                  = "\x01\x98\x6b\xd0"
-MSG_MAX_SIZE            = "\x00\xFF\xE3"    # 65507
-MSG_SECURITY_MODEL      = "\x03"        # usmSecurityModel
-MSG_VERSION = "\x02\x01\x03"
+MSG_ID                  = 26766288
+MSG_MAX_SIZE            = 65507
+MSG_SECURITY_MODEL      = 3       	# usmSecurityModel
+MSG_VERSION = 3
 
 def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privProto, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime)
 	msgPrivParam = ""
 	msgAuthParam = ["\x00" * 12].join
 
 	pdu =
-		OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
+		OpenSSL::ASN1::OctetString(msgAuthEngineID).to_der +
 		"\x04\x00" + "\xa1\x1b\x02\x04\x07\xcf\xc6\xa1\x02\x01\x00\x02\x01\x00" + 
 		"\x30\x0d\x30\x0b\x06\x07\x2b\x06\x01\x02\x01\x01\x01\x05\x00"
 
-	scopedPDU = SEQUENCE + [pdu.length].pack('C') + pdu
+	scopedPDU = OpenSSL::ASN1::Sequence([pdu])
 
 	# Privacy
 	if (msgFlags.unpack('H*').join.to_i == 3 || msgFlags.unpack('H*').join.to_i == 7)
@@ -180,7 +180,7 @@ def create_probe_snmp3(msgFlags, userName, authPass, authProto, privPass, privPr
 		puts "iv: " + iv.unpack('H*').join
 		puts "desKey: " + desKey.unpack('H*').join
 
-		scopedPDU = OCTET_STRING + [encryptedPDU.length].pack('C') + encryptedPDU
+		scopedPDU = OpenSSL::ASN1::OctetString(encryptedPDU)
 	end
 
 	# Authorization
@@ -209,36 +209,26 @@ end
 
 def gen_snmpMsg(msgFlags, msgAuthEngineID, msgAuthEngineBoots, msgAuthEngineTime, userName, msgAuthParam, msgPrivParam, scopedPDU)
 
-	msgGlobalData =
-		INTEGER + [MSG_ID.length].pack('C') + MSG_ID +
-		INTEGER + [MSG_MAX_SIZE.length].pack('C') + MSG_MAX_SIZE +
-		OCTET_STRING + [msgFlags.length].pack('C') + msgFlags +
-		INTEGER + [MSG_SECURITY_MODEL.length].pack('C') + MSG_SECURITY_MODEL
-	msgGlobalHead = SEQUENCE + [msgGlobalData.length].pack('C')
+	msgGlobalData = [
+		OpenSSL::ASN1::Integer.new(MSG_ID),
+		OpenSSL::ASN1::Integer.new(MSG_MAX_SIZE),
+		OpenSSL::ASN1::OctetString.new(msgFlags),
+		OpenSSL::ASN1::Integer.new(MSG_SECURITY_MODEL),
+	]
 
-	msgSecurityParameters   =
-		OCTET_STRING + [msgAuthEngineID.length].pack('C') + msgAuthEngineID +
-		INTEGER + [[msgAuthEngineBoots].pack('N').length].pack('C') + [msgAuthEngineBoots].pack('N') +
-		INTEGER + [[msgAuthEngineTime].pack('N').length].pack('C') + [msgAuthEngineTime].pack('N') +
-		OCTET_STRING + [userName.length].pack('C') + userName +
-		OCTET_STRING + [msgAuthParam.length].pack('C') + msgAuthParam +
-		OCTET_STRING + [msgPrivParam.length].pack('C') + msgPrivParam
-	msgSecurityHead         =
-		OCTET_STRING + [msgSecurityParameters.length + 2].pack('C') +
-		SEQUENCE + [msgSecurityParameters.length].pack('C')
+	msgSecurityParameters   = [
+		OpenSSL::ASN1.OctetString(msgAuthEngineID),
+		OpenSSL::ASN1.Integer(msgAuthEngineBoots),
+		OpenSSL::ASN1.Integer(msgAuthEngineTime),
+		OpenSSL::ASN1.OctetString(userName),
+		OpenSSL::ASN1.OctetString(msgAuthParam),
+		OpenSSL::ASN1.OctetString(msgPrivParam),
+	]
 
-	puts "msgSecurityHead: " + msgSecurityHead.unpack('H*').join
-
-	msg = MSG_VERSION + msgGlobalHead + msgGlobalData + msgSecurityHead + msgSecurityParameters + scopedPDU
-
-	if msgPrivParam != ""
-		snmpHead = SEQUENCE + [msg.length - msgPrivParam.length].pack('C') + [msg.length].pack('C')
-	else
-		snmpHead = SEQUENCE + [msg.length].pack('C')
-	end
+	msg = [ OpenSSL::ASN1.Integer(MSG_VERSION), OpenSSL::ASN1.Sequence(msgGlobalData), 
+	OpenSSL::ASN1.OctetString(OpenSSL::ASN1.Sequence(msgSecurityParameters).to_der), scopedPDU ]
 	
-	snmpMsg = snmpHead + msg
-	snmpMsg
+	wholeMsg = OpenSSL::ASN1.Sequence(msg).to_der
 end
 
 
@@ -300,7 +290,7 @@ rhost = ARGV[1]
 udp_socket = UDPSocket.new
 
 # Get our msgAuthEngine* values
-data = create_probe_snmp3([MSG_FLAGS_REPORTABLE].pack('C'), "", "", "", "", "", "", 0, 0)
+data = create_probe_snmp3(MSG_FLAGS_REPORTABLE.to_s, "", "", "", "", "", "", 0, 0)
 
 udp_socket.bind("127.0.0.1", 4913)
 
@@ -314,7 +304,7 @@ puts snmpReturn
 
 data =
 	create_probe_snmp3(
-		[MSG_FLAGS_REPORTABLE + MSG_FLAGS_AUTH + MSG_FLAGS_PRIV].pack('C'), 	# msgFlags
+		(MSG_FLAGS_REPORTABLE + MSG_FLAGS_AUTH + MSG_FLAGS_PRIV).to_s, 	# msgFlags
 		"authPrivUser",																						# user Name
 		"password", "MD5",																					# authPass, authProto
 		"password", "DES", 																			# privPass, privProto
